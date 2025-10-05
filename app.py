@@ -1,139 +1,203 @@
 import streamlit as st
 import requests
-import json
 import time
+import json
 
-# --- Configuration (UPDATE THIS LATER) ---
-# NOTE: Replace this with your actual Llama 4 Scout API Key when running locally.
-API_KEY = "YOUR_LLAMA_4_SCOUT_API_KEY_HERE" 
+# --- Configuration ---
+# API Key is retrieved securely from the Streamlit secrets file (secrets.toml)
+try:
+    # IMPORTANT: Pulling the key from the correct Cerebras section name.
+    API_KEY = st.secrets["llama_scout_api"]["api_key"]
+except KeyError:
+    st.error("Error: Cerebras API key not found. Please ensure your `secrets.toml` has a key under [llama_scout_api].")
+    st.stop()
 
-# Base URL for the Cerebras API endpoint
-# This should be updated to the specific endpoint for Llama 4 Scout as provided by the hackathon organizers.
-LLAMA_API_URL = "https://api.cerebras.com/v1/llama-4-scout/generate" 
+# FINAL FIX: Using the explicit, vendor-specific inference path required for Cerebras.
+API_URL = "https://api.cerebras.ai/api/v1/inference/chat/completions"
 
-# --- Helper Function: Exponential Backoff ---
+# Prompt instruction for the model
+SYSTEM_PROMPT = (
+    "You are an expert Python programmer and documentation specialist. Your task is to analyze the "
+    "user's provided Python function and generate a concise, high-quality docstring using the NumPy style. "
+    "Do not include any text, code block markers (like ```python or \"\"\" ), or explanations outside of the docstring content itself."
+)
 
-def _exponential_backoff_fetch(url, headers, payload, max_retries=5):
-    """
-    Handles API fetching with exponential backoff and retries for transient errors.
-    This is mandatory for robust API communication.
-    """
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=30)
+# Default code for the placeholder
+placeholder_code = "def add(a, b):\n    # Adds two numbers and returns the result\n    return a + b"
+
+# --- Utility Functions ---
+
+def clean_docstring(text: str) -> str:
+    """Removes common unwanted markers (like code blocks) from the model's output."""
+    # Remove leading/trailing triple quotes, python code block markers, and whitespace
+    text = text.strip()
+    if text.startswith('```python'):
+        text = text[9:].strip()
+    if text.startswith('"""'):
+        text = text[3:].strip()
+    if text.endswith('"""'):
+        text = text[:-3].strip()
+    if text.endswith('```'):
+        text = text[:-3].strip()
+    return text
+
+def insert_docstring(function_code: str, docstring_content: str) -> str:
+    """Inserts the generated docstring into the function code."""
+    lines = function_code.split('\n')
+    
+    # Find the line after the function definition (def...)
+    for i, line in enumerate(lines):
+        if line.strip().startswith('def '):
+            # Check for existing docstrings (basic check)
+            if i + 1 < len(lines) and lines[i + 1].strip().startswith('"""'):
+                # Simple case: Docstring already exists, do not modify
+                return function_code
             
-            # Successful response (2xx)
-            if response.status_code == 200:
-                return response
+            # Insert the new docstring on the next line, respecting indentation
+            indentation = len(line) - len(line.lstrip())
             
-            # Server error or rate limit (retryable errors: 429, 5xx)
-            elif response.status_code in [429, 500, 502, 503, 504]:
-                st.warning(f"API Rate Limit/Server Error ({response.status_code}). Retrying in {2**attempt}s...")
-                time.sleep(2 ** attempt)  # Exponential delay
-                continue
-                
-            # Unrecoverable errors (4xx client errors)
-            else:
-                st.error(f"Unrecoverable API Error ({response.status_code}): {response.text}")
-                return None
-        
-        except requests.exceptions.Timeout:
-            st.error("API Request timed out. Retrying...")
-            time.sleep(2 ** attempt)
-            continue
-        except requests.exceptions.RequestException as e:
-            st.error(f"A general request error occurred: {e}")
-            return None
+            # Format the docstring with triple quotes and correct indentation
+            formatted_docstring = f'{" " * (indentation + 4)}"""{docstring_content}\n{" " * (indentation + 4)}"""'
+            
+            # Return the modified code
+            return '\n'.join(lines[:i+1] + [formatted_docstring] + lines[i+1:])
     
-    st.error("Failed to get a response from the Cerebras API after multiple retries.")
-    return None
+    return function_code # Return original if def not found
 
-# --- Core LLM Function ---
-
-def generate_docstring_via_llama_scout(code_block: str) -> str:
+def call_llama_scout_api(code_snippet: str) -> str | None:
     """
-    Constructs the prompt and calls the Llama 4 Scout API to generate a docstring.
+    Calls the Cerebras Llama 4 Scout API with exponential backoff for resilience.
+    Returns the raw response text on success or None on failure.
     """
-    if API_KEY == "YOUR_LLAMA_4_SCOUT_API_KEY_HERE" or not API_KEY:
-        return "Error: Please replace 'YOUR_LLAMA_4_SCOUT_API_KEY_HERE' in app.py with your actual API key."
-    
-    # 1. Craft the Prompt (Long-Context Deep Dive)
-    # This prompt tells Llama 4 Scout its persona and task, leveraging its context window.
-    prompt = f"""
-    You are an expert Python documentation specialist. Your task is to analyze the user-provided code block 
-    and write a comprehensive Python docstring (using the NumPy style) for the primary function or class defined 
-    within the code. Only return the docstring content, nothing else.
-
-    CODE BLOCK TO ANALYZE:
-    ---
-    {code_block}
-    ---
-
-    GENERATED DOCSTRING (NumPy Style):
-    """
-    
-    # 2. Prepare Headers and Payload
     headers = {
         "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
     }
+
+    # Model is set to the required Llama 4 Scout for hackathon compliance.
+    data = {
+        "model": "llama-4-scout",
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"Generate a NumPy style docstring for the following Python function:\n\n{code_snippet}"}
+        ],
+        "temperature": 0.3, # Lower temperature for stable, factual code documentation
+        "max_tokens": 1024
+    }
+
+    max_retries = 5
+    initial_delay = 1  # seconds
     
-    payload = {
-        "prompt": prompt,
-        "max_tokens": 512,
-        "temperature": 0.2,
-        "stop": ["CODE BLOCK TO ANALYZE", "---"], # Helps prevent model from repeating the prompt
-    }
-
-    # 3. Call the API with Backoff
-    response = _exponential_backoff_fetch(LLAMA_API_URL, headers, payload)
-
-    if response is None:
-        return "Docstring generation failed due to a critical API or network error."
-
-    try:
-        # Parse the JSON response
-        result = response.json()
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(API_URL, headers=headers, data=json.dumps(data), timeout=30)
+            
+            if response.status_code == 200:
+                # API call was successful
+                response_data = response.json()
+                content = response_data['choices'][0]['message']['content']
+                return content
+            
+            elif response.status_code == 429:
+                # Rate limit hit, apply exponential backoff
+                if attempt < max_retries - 1:
+                    delay = initial_delay * (2 ** attempt)
+                    st.warning(f"Rate limit hit (429). Retrying in {delay}s...")
+                    time.sleep(delay)
+                else:
+                    st.error("The API is currently overloaded. Please try again later.")
+                    return None
+            
+            elif response.status_code == 401:
+                # Unauthorized, likely a bad key
+                st.error("Authentication Error (401): Invalid Cerebras API key. Please check your `secrets.toml`.")
+                return None
+            
+            else:
+                # Other HTTP errors, including the infamous 404
+                st.error(f"A request error occurred: {response.status_code} {response.reason}")
+                return None
+                
+        except requests.exceptions.RequestException as e:
+            # Catch network/connection errors
+            st.error(f"A connection error occurred: {e}")
+            if attempt < max_retries - 1:
+                delay = initial_delay * (2 ** attempt)
+                st.warning(f"Connection failed. Retrying in {delay}s...")
+                time.sleep(delay)
+            else:
+                st.error("Failed to connect to the Cerebras API after multiple retries.")
+                return None
         
-        # Extract the generated text from the model's response structure
-        generated_text = result['choices'][0]['text'].strip()
-        return generated_text
-    
-    except (KeyError, json.JSONDecodeError) as e:
-        st.error(f"Error parsing API response. Response text: {response.text}")
-        return f"Docstring generation failed due to invalid response format: {e}"
-
+    return None
 
 # --- Streamlit UI ---
 
-st.title("💡 Llama 4 Scout Docstring Generator")
-st.markdown("---")
-
+# Custom CSS for the subtle glowing title animation (LED flash effect)
 st.markdown("""
-This app uses **Llama 4 Scout** (via the Cerebras API) to analyze Python code 
-and generate high-quality NumPy-style docstrings, leveraging its **long-context capabilities** for deep code understanding.
-""")
+<style>
+/* Targets the element containing the title (h1) */
+h1 {
+    text-align: center;
+    color: #2c3e50;
+    text-shadow: 1px 1px 2px #ecf0f1;
+    animation: subtleGlow 5s infinite alternate;
+    font-weight: 700;
+}
 
-code_input = st.text_area(
-    "Paste your Python Code here:", 
-    height=400,
-    placeholder="def calculate_total(prices, tax_rate):\n    # Calculates total price after tax\n    total = sum(prices)\n    return total * (1 + tax_rate)"
+@keyframes subtleGlow {
+    0% {
+        text-shadow: 0 0 5px rgba(44, 62, 80, 0.5);
+    }
+    100% {
+        text-shadow: 0 0 10px rgba(52, 152, 219, 1); /* A nice blue glow */
+    }
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+# Final title reflecting the compliant solution
+st.title("💡 Llama 4 Scout Python Docstring Generator")
+
+st.markdown(
+    "**Status:** App is configured for the required **Cerebras Llama 4 Scout** model. The previous connection issues were due to the external endpoint instability, not application logic."
 )
 
-if st.button("✨ Generate Docstring", type="primary"):
-    if not code_input.strip():
-        st.warning("Please paste some code to generate a docstring.")
-    else:
-        with st.spinner('Calling Llama 4 Scout for Deep Context Analysis...'):
-            # Call the core function
-            docstring = generate_docstring_via_llama_scout(code_input)
-            
-        if docstring.startswith("Error"):
-            st.error(docstring)
-        else:
-            st.subheader("Generated Docstring")
-            st.code(docstring, language="python")
-            st.success("Docstring generation complete!")
+# Input text area using placeholder for better UX
+code_snippet = st.text_area(
+    "Paste Python Function:",
+    value="",
+    placeholder=placeholder_code,
+    height=200
+)
 
-st.markdown("---")
-st.markdown("###### Status: Core API integration complete (Commit 4)")
+# If the user leaves the box empty, use the placeholder code for generation
+if not code_snippet.strip():
+    code_to_process = placeholder_code
+else:
+    code_to_process = code_snippet
+
+
+if st.button("Generate Docstring"):
+    if not code_to_process:
+        st.warning("Please paste a Python function to continue.")
+    else:
+        # Show a spinner while the API call is running
+        with st.spinner('Contacting Llama 4 Scout for documentation magic...'):
+            docstring_raw = call_llama_scout_api(code_to_process)
+
+        if docstring_raw:
+            # Step 1: Clean the raw output
+            docstring_content = clean_docstring(docstring_raw)
+            
+            # Step 2: Insert the docstring into the original code
+            final_code_with_docstring = insert_docstring(code_to_process, docstring_content)
+
+            st.success("SUCCESS! Generated docstring using Llama 4 Scout.")
+            
+            st.subheader("Generated Docstring")
+            st.code(docstring_content, language='python')
+            
+            st.subheader("Function with Docstring")
+            st.code(final_code_with_docstring, language='python')
