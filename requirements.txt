@@ -1,2 +1,5 @@
 flask
 cerebras-cloud-sdk
+# requirements.txt
+requests
+streamlit
