@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  docstring-generator:
+    build: .
+    container_name: cerebras_llama_app
+    restart: always
+    ports:
+      # Map host port 8080 to container port 5000
+      - "8080:5000"
+    volumes:
+      # Mount the current directory for easy code updates (optional but helpful)
+      - .:/app

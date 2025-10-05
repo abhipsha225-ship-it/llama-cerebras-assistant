@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Cerebras Llama Docstring Generator</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f9; }
+        .container { max-width: 800px; margin: auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        h1 { color: #800080; }
+        textarea { width: 100%; min-height: 200px; padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-family: monospace; font-size: 14px; box-sizing: border-box; }
+        pre { background: #eee; padding: 15px; border-left: 5px solid #800080; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; }
+        button { background-color: #800080; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; margin-top: 10px; }
+        button:hover { background-color: #6a006a; }
+        .latency { margin-top: 20px; font-weight: bold; color: #008000; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Llama Docstring Generator (Cerebras Cloud)</h1>
+
+        <form method="POST" action="/">
+            <label for="code_input">Paste Your Python Function Below:</label>
+            <textarea id="code_input" name="code_input" placeholder="e.g., def my_func(a, b): return a + b">{{ input_code }}</textarea>
+            <button type="submit">Generate Docstring</button>
+        </form>
+
+        {% if docstring %}
+            <h2>Generated Docstring:</h2>
+            <pre>{{ docstring }}</pre>
+            <div class="latency">
+                Latency: {{ latency }} ms
+            </div>
+        {% endif %}
+
+        {% if error %}
+            <div style="color: red; margin-top: 20px;">
+                Error: {{ error }}
+            </div>
+        {% endif %}
+    </div>
+</body>
+</html>
